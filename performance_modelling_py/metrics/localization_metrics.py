@@ -288,18 +288,6 @@ def relative_localization_error_metrics_for_each_waypoint(log_output_folder, est
 
     metric_results_per_waypoint['version'] = "0.1"
     metric_results_per_waypoint['relative_localization_error_per_waypoint_list'] = metric_results_per_waypoint_list
-    metric_results_per_waypoint_translation_mean = 0
-    metric_results_per_waypoint_rotation_mean = 0
-    for relative_localization_error in metric_results_per_waypoint_list:
-        try:
-            metric_results_per_waypoint_translation_mean += relative_localization_error['random_relations']['translation']['mean']
-            metric_results_per_waypoint_rotation_mean += relative_localization_error['random_relations']['rotation']['mean']
-        except TypeError:  # in case translation or rotation was not computed
-            print_error("relative_localization_error:", relative_localization_error)
-            continue
-    metric_results_per_waypoint['relative_localization_error_per_waypoint_mean'] = dict()
-    metric_results_per_waypoint['relative_localization_error_per_waypoint_mean']['translation'] = metric_results_per_waypoint_translation_mean / len(metric_results_per_waypoint_list)
-    metric_results_per_waypoint['relative_localization_error_per_waypoint_mean']['rotation'] = metric_results_per_waypoint_rotation_mean / len(metric_results_per_waypoint_list)
     return metric_results_per_waypoint
 
 
@@ -546,8 +534,8 @@ def relative_localization_error_metrics(log_output_folder, estimated_poses_file_
         relative_errors_dict['sequential_relations']['rotation']['n'] = float(metric_evaluator_ordered_r_results_df['NumMeasures'][0])
 
     relative_errors_dict['version'] = "0.1"
-    relative_errors_dict['start_time'] = start_time
-    relative_errors_dict['end_time'] = end_time
+    relative_errors_dict['start_time'] = float(start_time)
+    relative_errors_dict['end_time'] = float(end_time)
 
     return relative_errors_dict
 
