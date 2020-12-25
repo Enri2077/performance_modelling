@@ -61,7 +61,7 @@ def compute_ground_truth_interpolated_poses(estimated_poses_df, ground_truth_pos
         right=forward_matches,
         on='t_estimate')
 
-    interpolated_ground_truth_df = pd.DataFrame(columns=['t', 'x_est', 'y_est', 'theta_est', 'x_gt', 'y_gt', 'theta_gt'])
+    interpolated_ground_truth_list = list()
     for index, row in forward_backward_matches.iterrows():
         t_gt_1, t_gt_2 = row['t_ground_truth_x'], row['t_ground_truth_y']
         t_int = row['t_estimate']
@@ -82,7 +82,7 @@ def compute_ground_truth_interpolated_poses(estimated_poses_df, ground_truth_pos
         theta_gt_1, theta_gt_2 = row['theta_ground_truth_x'], row['theta_ground_truth_y']
         theta_int = np.interp(t_int, [t_gt_1, t_gt_2], [theta_gt_1, theta_gt_2])
 
-        interpolated_ground_truth_df = interpolated_ground_truth_df.append({
+        interpolated_ground_truth_list.append({
             't': t_int,
             'x_est': x_est,
             'y_est': y_est,
@@ -90,8 +90,9 @@ def compute_ground_truth_interpolated_poses(estimated_poses_df, ground_truth_pos
             'x_gt': x_int,
             'y_gt': y_int,
             'theta_gt': theta_int,
-        }, ignore_index=True)
+        })
 
+    interpolated_ground_truth_df = pd.DataFrame(interpolated_ground_truth_list)
     return interpolated_ground_truth_df
 
 
@@ -259,6 +260,97 @@ def geometric_similarity_environment_metric(geometric_similarity_file_path, star
     return metrics_result_dict
 
 
+def waypoint_relative_localization_error_metrics_for_each_waypoint(estimated_poses_file_path, ground_truth_poses_file_path, run_events_file_path):
+
+    # check required files exist
+    if not path.isfile(estimated_poses_file_path):
+        print_error("compute_relative_localization_error: estimated_poses file not found {}".format(estimated_poses_file_path))
+        return
+
+    if not path.isfile(ground_truth_poses_file_path):
+        print_error("compute_relative_localization_error: ground_truth_poses file not found {}".format(ground_truth_poses_file_path))
+        return
+
+    if not path.isfile(run_events_file_path):
+        print_error("compute_relative_localization_error: run_events file not found {}".format(run_events_file_path))
+        return
+
+    # get waypoint timestamps info from run events
+    run_events_df = pd.read_csv(run_events_file_path, engine='python', sep=', ')
+    target_pose_reached_df = run_events_df[run_events_df.event == 'target_pose_reached']
+    target_pose_reached_timestamps_df = target_pose_reached_df.timestamp.reset_index(drop=True)
+    waypoints_start_end_times_df = pd.DataFrame({'start_timestamp': list(target_pose_reached_timestamps_df[0:-1]), 'end_timestamp': list(target_pose_reached_timestamps_df[1:])})
+    metric_results_per_waypoint = dict()
+    metric_results_per_waypoint_list = list()
+
+    # get the dataframes for estimated poses and ground truth poses
+    estimated_poses_df = pd.read_csv(estimated_poses_file_path)
+    ground_truth_poses_df = pd.read_csv(ground_truth_poses_file_path)
+
+    # compute the interpolated ground truth poses
+    interpolated_ground_truth_df = compute_ground_truth_interpolated_poses(estimated_poses_df, ground_truth_poses_df)
+
+    # if not enough matching ground truth data points are found, the metrics can not be computed
+    if len(interpolated_ground_truth_df.index) < 2:
+        print_error("no matching ground truth data points were found")
+        return
+
+    for index, start_timestamp, end_timestamp in waypoints_start_end_times_df[['start_timestamp', 'end_timestamp']].itertuples():
+        assert(start_timestamp < end_timestamp)
+
+        # get start pose and end pose that most closely matches start and end times
+        interpolated_ground_truth_prev_waypoint = interpolated_ground_truth_df[(interpolated_ground_truth_df.t < start_timestamp)].iloc[-1]
+        estimated_start_pose = interpolated_ground_truth_prev_waypoint[['x_est', 'y_est', 'theta_est']].values
+        ground_truth_start_pose = interpolated_ground_truth_prev_waypoint[['x_gt', 'y_gt', 'theta_gt']].values
+
+        interpolated_ground_truth_df_clipped = interpolated_ground_truth_df[(start_timestamp <= interpolated_ground_truth_df.t) & (interpolated_ground_truth_df.t <= end_timestamp)]
+        estimated_end_poses = interpolated_ground_truth_df_clipped[['x_est', 'y_est', 'theta_est']].values
+        ground_truth_end_poses = interpolated_ground_truth_df_clipped[['x_gt', 'y_gt', 'theta_gt']].values
+        translation_errors = list()
+        rotation_errors = list()
+        for i in range(len(interpolated_ground_truth_df_clipped)):
+            estimated_end_pose = estimated_end_poses[i]
+            ground_truth_end_pose = ground_truth_end_poses[i]
+
+            # compute estimated transform from start to end
+            estimated_transform_hc = get_matrix_diff(estimated_start_pose, estimated_end_pose)
+            estimated_relative_pose = np.array([estimated_transform_hc[0, 2], estimated_transform_hc[1, 2], math.atan2(estimated_transform_hc[1, 0], estimated_transform_hc[0, 0])])
+
+            # compute ground truth transform from start to end
+            ground_truth_transform = get_matrix_diff(ground_truth_start_pose, ground_truth_end_pose)
+            ground_truth_relative_pose = np.array([ground_truth_transform[0, 2], ground_truth_transform[1, 2], math.atan2(ground_truth_transform[1, 0], ground_truth_transform[0, 0])])
+
+            # compute transform between ground truth and estimate
+            relative_error_transform_hc = get_matrix_diff(ground_truth_relative_pose, estimated_relative_pose)
+            relative_error_x, relative_error_y, relative_error_theta = relative_error_transform_hc[0, 2], relative_error_transform_hc[1, 2], math.atan2(relative_error_transform_hc[1, 0], relative_error_transform_hc[0, 0])
+
+            translation_errors.append(np.sqrt(relative_error_x ** 2 + relative_error_y ** 2))
+            rotation_errors.append(np.abs(relative_error_theta))
+
+        waypoint_relative_localization_error = {
+            'translation_error_min': float(np.min(translation_errors)),
+            'rotation_error_min': float(np.min(rotation_errors)),
+
+            'translation_error_mean': float(np.mean(translation_errors)),
+            'rotation_error_mean': float(math.atan2(np.sum(np.sin(rotation_errors)), np.sum(np.cos(rotation_errors)))),
+
+            'translation_error_max': float(np.max(translation_errors)),
+            'rotation_error_max': float(np.max(rotation_errors)),
+
+            'translation_error_final': float(translation_errors[-1]),
+            'rotation_error_final': float(rotation_errors[-1]),
+
+            'start_time': start_timestamp,
+            'end_time': end_timestamp,
+        }
+
+        metric_results_per_waypoint_list.append(waypoint_relative_localization_error)
+
+    metric_results_per_waypoint['version'] = "0.1"
+    metric_results_per_waypoint['relative_localization_error_per_waypoint_list'] = metric_results_per_waypoint_list
+    return metric_results_per_waypoint
+
+
 def relative_localization_error_metrics_for_each_waypoint(log_output_folder, estimated_poses_file_path, ground_truth_poses_file_path, run_events_file_path, alpha=0.9, max_error=0.02, compute_sequential_relations=False):
 
     # check required files exist
@@ -332,7 +424,7 @@ def relative_localization_error_metrics(log_output_folder, estimated_poses_file_
     # compute the interpolated ground truth poses
     interpolated_ground_truth_df = compute_ground_truth_interpolated_poses(estimated_poses_df, ground_truth_poses_df)
 
-    # if not enough matching ground truth data points are found, the metrics con not be computed
+    # if not enough matching ground truth data points are found, the metrics can not be computed
     if len(interpolated_ground_truth_df.index) < 2:
         print_error("no matching ground truth data points were found")
         return
@@ -617,32 +709,18 @@ def get_matrix_diff(p1, p2):
     Computes the rototranslation difference of two points
     """
 
-    x1, y1, theta1 = p1
-    x2, y2, theta2 = p2
+    p1_hc = np.array([
+        [np.cos(p1[2]), -np.sin(p1[2]), p1[0]],
+        [np.sin(p1[2]), np.cos(p1[2]), p1[1]],
+        [0, 0, 1],
+    ])
+    p2_hc = np.array([
+        [np.cos(p2[2]), -np.sin(p2[2]), p2[0]],
+        [np.sin(p2[2]), np.cos(p2[2]), p2[1]],
+        [0, 0, 1],
+    ])
 
-    m_translation1 = np.matrix(((1, 0, 0, x1),
-                                (0, 1, 0, y1),
-                                (0, 0, 1, 0),
-                                (0, 0, 0, 1)))
-
-    m_translation2 = np.matrix(((1, 0, 0, x2),
-                                (0, 1, 0, y2),
-                                (0, 0, 1, 0),
-                                (0, 0, 0, 1)))
-
-    m_rotation1 = np.matrix(((math.cos(theta1), -math.sin(theta1), 0, 0),
-                             (math.sin(theta1), math.cos(theta1), 0, 0),
-                             (0, 0, 1, 0),
-                             (0, 0, 0, 1)))
-
-    m_rotation2 = np.matrix(((math.cos(theta2), -math.sin(theta2), 0, 0),
-                             (math.sin(theta2), math.cos(theta2), 0, 0),
-                             (0, 0, 1, 0),
-                             (0, 0, 0, 1)))
-
-    m1 = m_translation1 * m_rotation1
-    m2 = m_translation2 * m_rotation2
-    return m1.I * m2
+    return np.linalg.inv(p1_hc) @ p2_hc
 
 
 def absolute_localization_error_metrics(estimated_poses_file_path, ground_truth_poses_file_path):
@@ -664,7 +742,7 @@ def absolute_localization_error_metrics(estimated_poses_file_path, ground_truth_
     ground_truth_poses_df = pd.read_csv(ground_truth_poses_file_path)
     df = compute_ground_truth_interpolated_poses(estimated_poses_df, ground_truth_poses_df)
 
-    # if no matching ground truth data points are found, the metrics con not be computed
+    # if no matching ground truth data points are found, the metrics can not be computed
     if len(df.index) < 2:
         print_error("no matching ground truth data points were found")
         return
@@ -815,6 +893,52 @@ def trajectory_length_metric(ground_truth_poses_file_path):
     trajectory_length = euclidean_distance_of_deltas.sum()
 
     return float(trajectory_length)
+
+
+def trajectory_length_metric_per_waypoint(ground_truth_poses_file_path, run_events_file_path):
+
+    # check required files exist
+    if not path.isfile(ground_truth_poses_file_path):
+        print_error("compute_trajectory_length: ground_truth_poses file not found {}".format(ground_truth_poses_file_path))
+        return None
+
+    if not path.isfile(run_events_file_path):
+        print_error("compute_trajectory_length: run_events file not found {}".format(run_events_file_path))
+        return None
+
+    # get waypoint timestamps info from run events
+    run_events_df = pd.read_csv(run_events_file_path, engine='python', sep=', ')
+    target_pose_reached_df = run_events_df[run_events_df.event == 'target_pose_reached']
+    target_pose_reached_timestamps_df = target_pose_reached_df.timestamp.reset_index(drop=True)
+    waypoints_start_end_times_df = pd.DataFrame({'start_timestamp': list(target_pose_reached_timestamps_df[0:-1]), 'end_timestamp': list(target_pose_reached_timestamps_df[1:])})
+    metric_results_per_waypoint = dict()
+    metric_results_per_waypoint_list = list()
+
+    # get the dataframes for estimated poses and ground truth poses
+    ground_truth_poses_df = pd.read_csv(ground_truth_poses_file_path)
+
+    for index, start_timestamp, end_timestamp in waypoints_start_end_times_df[['start_timestamp', 'end_timestamp']].itertuples():
+        assert(start_timestamp < end_timestamp)
+
+        ground_truth_poses_df_clipped = ground_truth_poses_df[(start_timestamp <= ground_truth_poses_df.t) & (ground_truth_poses_df.t <= end_timestamp)]
+        ground_truth_positions = ground_truth_poses_df_clipped[['x', 'y']].values
+
+        squared_deltas = (ground_truth_positions[1:-1] - ground_truth_positions[0:-2]) ** 2  # equivalent to (x_2-x_1)**2, (y_2-y_1)**2, for each row
+        sum_of_squared_deltas = np.sum(squared_deltas, axis=1)  # equivalent to (x_2-x_1)**2 + (y_2-y_1)**2, for each row
+        euclidean_distance_of_deltas = np.sqrt(sum_of_squared_deltas)  # equivalent to sqrt( (x_2-x_1)**2 + (y_2-y_1)**2 ), for each row
+        trajectory_length = euclidean_distance_of_deltas.sum()
+
+        waypoint_metric_results = {
+            'trajectory_length': float(trajectory_length),
+            'start_time': start_timestamp,
+            'end_time': end_timestamp,
+        }
+
+        metric_results_per_waypoint_list.append(waypoint_metric_results)
+
+    metric_results_per_waypoint['version'] = "0.1"
+    metric_results_per_waypoint['trajectory_length_per_waypoint_list'] = metric_results_per_waypoint_list
+    return metric_results_per_waypoint
 
 
 def estimated_pose_trajectory_length_metric(estimated_poses_file_path):
