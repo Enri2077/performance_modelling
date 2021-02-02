@@ -723,6 +723,78 @@ def get_matrix_diff(p1, p2):
     return np.linalg.inv(p1_hc) @ p2_hc
 
 
+def waypoint_absolute_localization_error_metrics(estimated_poses_file_path, ground_truth_poses_file_path, run_events_file_path):
+
+    # check required files exist
+    if not path.isfile(estimated_poses_file_path):
+        print_error("waypoint_absolute_localization_error_metrics: estimated_poses file not found {}".format(estimated_poses_file_path))
+        return
+
+    if not path.isfile(ground_truth_poses_file_path):
+        print_error("waypoint_absolute_localization_error_metrics: ground_truth_poses file not found {}".format(ground_truth_poses_file_path))
+        return
+
+    if not path.isfile(run_events_file_path):
+        print_error("waypoint_absolute_localization_error_metrics: run_events file not found {}".format(run_events_file_path))
+        return
+
+    # get waypoint timestamps info from run events
+    run_events_df = pd.read_csv(run_events_file_path, engine='python', sep=', ')
+    target_pose_reached_df = run_events_df[run_events_df.event == 'target_pose_reached']
+    target_pose_reached_timestamps_df = target_pose_reached_df.timestamp.reset_index(drop=True)
+    waypoints_start_end_times_df = pd.DataFrame({'start_timestamp': list(target_pose_reached_timestamps_df[0:-1]), 'end_timestamp': list(target_pose_reached_timestamps_df[1:])})
+    metric_results_per_waypoint = dict()
+    metric_results_per_waypoint_list = list()
+
+    # get the dataframes for estimated poses and ground truth poses
+    estimated_poses_df = pd.read_csv(estimated_poses_file_path)
+    ground_truth_poses_df = pd.read_csv(ground_truth_poses_file_path)
+
+    # compute the interpolated ground truth poses
+    interpolated_ground_truth_df = compute_ground_truth_interpolated_poses(estimated_poses_df, ground_truth_poses_df)
+
+    # if not enough matching ground truth data points are found, the metrics can not be computed
+    if len(interpolated_ground_truth_df.index) < 2:
+        print_error("waypoint_absolute_localization_error_metrics: no matching ground truth data points were found")
+        return
+
+    for index, start_timestamp, end_timestamp in waypoints_start_end_times_df[['start_timestamp', 'end_timestamp']].itertuples():
+        assert(start_timestamp < end_timestamp)
+
+        # get start pose and end pose that most closely matches start and end times
+        interpolated_ground_truth_prev_waypoint = interpolated_ground_truth_df[(interpolated_ground_truth_df.t < start_timestamp)].iloc[-1]
+        estimated_start_pose = interpolated_ground_truth_prev_waypoint[['x_est', 'y_est', 'theta_est']].values
+        ground_truth_start_pose = interpolated_ground_truth_prev_waypoint[['x_gt', 'y_gt', 'theta_gt']].values
+
+        absolute_translation_error_start = np.sqrt((ground_truth_start_pose[0] - estimated_start_pose[0]) ** 2 + (ground_truth_start_pose[1] - estimated_start_pose[1]) ** 2)
+        absolute_rotation_error_start = np.abs(ground_truth_start_pose[2] - estimated_start_pose[2])
+
+        interpolated_ground_truth_df_clipped = interpolated_ground_truth_df[(start_timestamp <= interpolated_ground_truth_df.t) & (interpolated_ground_truth_df.t <= end_timestamp)].iloc[-1]
+        estimated_end_pose = interpolated_ground_truth_df_clipped[['x_est', 'y_est', 'theta_est']].values
+        ground_truth_end_pose = interpolated_ground_truth_df_clipped[['x_gt', 'y_gt', 'theta_gt']].values
+
+        absolute_translation_error_end = np.sqrt((ground_truth_end_pose[0] - estimated_end_pose[0]) ** 2 + (ground_truth_end_pose[1] - estimated_end_pose[1]) ** 2)
+        absolute_rotation_error_end = np.abs(ground_truth_end_pose[2] - estimated_end_pose[2])
+
+        waypoint_relative_localization_error = {
+
+            'absolute_translation_error_start': float(absolute_translation_error_start),
+            'absolute_rotation_error_start': float(absolute_rotation_error_start),
+
+            'absolute_translation_error_end': float(absolute_translation_error_end),
+            'absolute_rotation_error_end': float(absolute_rotation_error_end),
+
+            'start_time': start_timestamp,
+            'end_time': end_timestamp,
+        }
+
+        metric_results_per_waypoint_list.append(waypoint_relative_localization_error)
+
+    metric_results_per_waypoint['version'] = "0.1"
+    metric_results_per_waypoint['absolute_error_per_waypoint_list'] = metric_results_per_waypoint_list
+    return metric_results_per_waypoint
+
+
 def absolute_localization_error_metrics(estimated_poses_file_path, ground_truth_poses_file_path):
 
     # check required files exist
