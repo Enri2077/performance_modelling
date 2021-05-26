@@ -106,7 +106,7 @@ def execute_grid_benchmark(benchmark_run_object, grid_benchmark_configuration, e
     num_combinations = len(parameters_combinations_dict_list)
     num_runs_remaining = len(remaining_params_combinations)
     num_executed_runs = len(run_folders)
-    num_executed_combinations = len(filter(lambda x: x > 0, executed_params_combinations.values()))
+    num_executed_combinations = len(list(filter(lambda x: x > 0, executed_params_combinations.values())))
 
     if ignore_executed_params_combinations:
         print_info("ignoring previous runs")
